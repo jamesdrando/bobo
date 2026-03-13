@@ -1,0 +1,94 @@
+{
+  "project_name": "bobo",
+  "project_description": "Bobo orchestrates big operations with agentic A.I. and is optimized for parallel software delivery.",
+  "project_resources": [
+    "README.md",
+    "bobo.py",
+    "tests/test_bobo.py"
+  ],
+  "output": {
+    "agents_dir": "generated_agents",
+    "database_path": ".bobo/handoffs.sqlite3"
+  },
+  "execution_policy": {
+    "max_files_per_task": 1,
+    "max_functions_per_task": 3,
+    "minimal_test_feedback": true,
+    "failure_feedback_contract": "If tests fail, report only pass/fail, the exact command, a one-line failure summary, and the top stack frame."
+  },
+  "task_details": "Claim your next task from the handoff queue. Stay inside the assigned file and function scope. Do not widen scope without a new planner handoff.",
+  "shared_instructions": [
+    "Keep packets narrow and deterministic.",
+    "Prefer local fixes over broad refactors.",
+    "Escalate cross-file or cross-team changes back to the planner.",
+    "Use the handoff payload as the canonical task log."
+  ],
+  "agent_protocol": {
+    "response_rules": [
+      "Return exactly one JSON object.",
+      "Do not use markdown, prose, or code fences.",
+      "Use tool calls for every action.",
+      "You do not have shell access."
+    ]
+  },
+  "roles": [
+    {
+      "name": "Planner",
+      "model_tier": "frontier",
+      "summary": "Builds the granular schedule, sets file ownership, and keeps the dependency graph coherent.",
+      "responsibilities": [
+        "Break work into dependency-aware packets that touch one file at a time whenever possible.",
+        "Name the exact files and functions each worker may change.",
+        "Define acceptance criteria and the smallest validating test command for every packet.",
+        "Re-plan when blocked work needs a new interface or wider scope."
+      ],
+      "handoff_targets": [
+        "Implementer",
+        "Verifier",
+        "Integrator"
+      ],
+      "task_details": "Create or refine the execution schedule. Emit compact task packets that keep cheap workers inside one file and a few functions."
+    },
+    {
+      "name": "Implementer",
+      "model_tier": "cheap",
+      "summary": "Implements one narrow packet at a time and avoids self-expanding the scope.",
+      "responsibilities": [
+        "Modify only the assigned file and the named functions unless the planner explicitly says otherwise.",
+        "Leave concise notes in the handoff payload about what changed and what remains.",
+        "Request the smallest relevant test run before handing off."
+      ],
+      "handoff_targets": [
+        "Verifier",
+        "Integrator"
+      ]
+    },
+    {
+      "name": "Verifier",
+      "model_tier": "cheap",
+      "summary": "Validates packets with narrow checks and returns compact pass or fail feedback.",
+      "responsibilities": [
+        "Call `run_linter_and_tests` with the specific validation command tied to the packet.",
+        "Return only pass or fail, the command, a one-line summary, and the top stack frame on failure.",
+        "Escalate recurring failures back to the planner instead of widening scope."
+      ],
+      "handoff_targets": [
+        "Planner",
+        "Integrator"
+      ]
+    },
+    {
+      "name": "Integrator",
+      "model_tier": "cheap-plus",
+      "summary": "Assembles completed packets, resolves light coordination issues, and prepares merged delivery.",
+      "responsibilities": [
+        "Combine completed packets without reopening settled files unless necessary.",
+        "Keep merge notes brief and actionable.",
+        "Escalate architectural conflicts back to the planner."
+      ],
+      "handoff_targets": [
+        "Planner"
+      ]
+    }
+  ]
+}

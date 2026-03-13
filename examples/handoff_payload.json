@@ -1,0 +1,29 @@
+{
+  "run_id": "run-001",
+  "task_id": "task-implement-bobo-render",
+  "title": "Implement the AGENTS renderer",
+  "summary": "Render role-specific AGENTS.md files from the JSON configuration.",
+  "rationale": "The planner narrowed this packet to one file and the core render path.",
+  "from_role": "Planner",
+  "to_role": "Implementer",
+  "priority": 1,
+  "file_scope": [
+    "bobo.py"
+  ],
+  "function_scope": [
+    "normalize_config",
+    "render_agent_markdown",
+    "write_agents"
+  ],
+  "acceptance_criteria": [
+    "The renderer writes one AGENTS.md file per role.",
+    "Each AGENTS.md includes the role-specific responsibilities and handoff instructions."
+  ],
+  "dependencies": [],
+  "artifacts": [
+    "generated_agents/planner/AGENTS.md"
+  ],
+  "test_status": "not_run",
+  "test_command": "python3 -m unittest discover -v",
+  "next_action": "Implement the packet and hand off to Verifier."
+}
