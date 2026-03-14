@@ -9,6 +9,7 @@ This repo now includes a minimal orchestration engine in [bobo.py](/home/drandal
 - stores compact agent handoffs in SQLite through the harness, instead of letting agents touch the database directly
 - executes registered external tools inside the workspace instead of handing raw commands back to an outer harness
 - blocks high-impact tools such as dependency changes until the caller explicitly approves them
+- can issue provider-agnostic LLM calls through `llm-complete` (including AWS Bedrock)
 
 Example flow:
 
@@ -17,8 +18,11 @@ python3 bobo.py render-agents --config examples/software_team.json
 python3 bobo.py init-db --config examples/software_team.json
 python3 bobo.py parse-agent-output --config examples/software_team.json --role Implementer --input-file examples/agent_claim_call.json
 python3 bobo.py dispatch-agent-output --config examples/software_team.json --role Implementer --input-file examples/agent_claim_call.json --base-path .
+python3 bobo.py llm-complete --provider bedrock --model anthropic.claude-3-5-sonnet-20240620-v1:0 --prompt "Give me a one-line status." --region us-east-1
 python3 -m unittest discover -v
 ```
+
+`llm-complete` accepts `--prompt` or structured `--messages-json/--messages-file` inputs and returns a normalized JSON result (`provider`, `model`, `message`, token usage, and raw provider response).
 
 The sample team in [examples/software_team.json](/home/drandall/bobo/examples/software_team.json) is optimized for a single strong planner and inexpensive workers:
 

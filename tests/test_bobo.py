@@ -5,6 +5,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import bobo
 
@@ -340,6 +341,146 @@ class BoboEngineTests(unittest.TestCase):
                 ),
                 base_path=self.root,
             )
+
+
+class LLMHarnessTests(unittest.TestCase):
+    def test_build_llm_request_from_prompt_args(self) -> None:
+        args = bobo.parse_args(
+            [
+                "llm-complete",
+                "--provider",
+                "bedrock",
+                "--model",
+                "anthropic.claude-3-5-sonnet-20240620-v1:0",
+                "--prompt",
+                "Hello from bobo",
+                "--system",
+                "You are concise.",
+                "--max-tokens",
+                "128",
+                "--temperature",
+                "0.2",
+                "--top-p",
+                "0.9",
+                "--stop-sequence",
+                "STOP",
+            ]
+        )
+
+        request = bobo.build_llm_request_from_args(args)
+
+        self.assertEqual("bedrock", request["provider"])
+        self.assertEqual("anthropic.claude-3-5-sonnet-20240620-v1:0", request["model"])
+        self.assertEqual("system", request["messages"][0]["role"])
+        self.assertEqual("You are concise.", request["messages"][0]["content"])
+        self.assertEqual("user", request["messages"][1]["role"])
+        self.assertEqual("Hello from bobo", request["messages"][1]["content"])
+        self.assertEqual(128, request["max_tokens"])
+        self.assertEqual(0.2, request["temperature"])
+        self.assertEqual(0.9, request["top_p"])
+        self.assertEqual(["STOP"], request["stop_sequences"])
+
+    def test_llm_complete_bedrock_uses_converse(self) -> None:
+        class FakeBedrockClient:
+            def __init__(self) -> None:
+                self.last_request: dict | None = None
+
+            def converse(self, **kwargs):
+                self.last_request = kwargs
+                return {
+                    "output": {
+                        "message": {
+                            "role": "assistant",
+                            "content": [{"text": "Bedrock reply"}],
+                        }
+                    },
+                    "stopReason": "end_turn",
+                    "usage": {"inputTokens": 10, "outputTokens": 4, "totalTokens": 14},
+                    "metrics": {"latencyMs": 123},
+                    "ResponseMetadata": {"RequestId": "req-123"},
+                }
+
+        class FakeSession:
+            def __init__(self, client: FakeBedrockClient, **session_kwargs) -> None:
+                self.client_impl = client
+                self.session_kwargs = session_kwargs
+                self.client_calls: list[tuple[str, dict]] = []
+
+            def client(self, service_name: str, **client_kwargs):
+                self.client_calls.append((service_name, client_kwargs))
+                return self.client_impl
+
+        class FakeBoto3:
+            def __init__(self) -> None:
+                self.client_impl = FakeBedrockClient()
+                self.created_sessions: list[FakeSession] = []
+                self.session = self
+
+            def Session(self, **session_kwargs):
+                session = FakeSession(self.client_impl, **session_kwargs)
+                self.created_sessions.append(session)
+                return session
+
+        fake_boto3 = FakeBoto3()
+        with mock.patch("bobo.importlib.import_module", return_value=fake_boto3):
+            response = bobo.llm_complete(
+                {
+                    "provider": "bedrock",
+                    "model": "anthropic.claude-3-5-sonnet-20240620-v1:0",
+                    "messages": [
+                        {"role": "system", "content": "You are concise."},
+                        {"role": "user", "content": "Say hello."},
+                    ],
+                    "max_tokens": 64,
+                    "temperature": 0.1,
+                    "top_p": 0.8,
+                    "stop_sequences": ["STOP"],
+                    "region_name": "us-east-1",
+                    "profile_name": "default",
+                    "provider_options": {
+                        "converse_kwargs": {"additionalModelResponseFieldPaths": []}
+                    },
+                }
+            )
+
+        self.assertEqual("bedrock", response["provider"])
+        self.assertEqual("Bedrock reply", response["message"]["content"])
+        self.assertEqual("req-123", response["request_id"])
+        self.assertEqual(1, len(fake_boto3.created_sessions))
+        session = fake_boto3.created_sessions[0]
+        self.assertEqual({"profile_name": "default"}, session.session_kwargs)
+        self.assertEqual("bedrock-runtime", session.client_calls[0][0])
+        self.assertEqual({"region_name": "us-east-1"}, session.client_calls[0][1])
+        self.assertIsNotNone(fake_boto3.client_impl.last_request)
+        assert fake_boto3.client_impl.last_request is not None
+        self.assertEqual(
+            "anthropic.claude-3-5-sonnet-20240620-v1:0",
+            fake_boto3.client_impl.last_request["modelId"],
+        )
+        self.assertEqual(
+            [{"text": "You are concise."}],
+            fake_boto3.client_impl.last_request["system"],
+        )
+        self.assertEqual(
+            [{"role": "user", "content": [{"text": "Say hello."}]}],
+            fake_boto3.client_impl.last_request["messages"],
+        )
+        self.assertEqual(
+            64,
+            fake_boto3.client_impl.last_request["inferenceConfig"]["maxTokens"],
+        )
+        self.assertEqual(
+            0.1,
+            fake_boto3.client_impl.last_request["inferenceConfig"]["temperature"],
+        )
+        self.assertEqual(
+            0.8,
+            fake_boto3.client_impl.last_request["inferenceConfig"]["topP"],
+        )
+        self.assertEqual(
+            ["STOP"],
+            fake_boto3.client_impl.last_request["inferenceConfig"]["stopSequences"],
+        )
 
 
 if __name__ == "__main__":

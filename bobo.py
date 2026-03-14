@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import importlib
 import json
 import shlex
 import sqlite3
@@ -10,7 +11,7 @@ import sys
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 
 DEFAULT_CODE_STYLE = [
@@ -97,6 +98,7 @@ VALID_HANDOFF_STATUSES = {"pending", "claimed", "completed", "blocked"}
 VALID_TEST_STATUSES = {"pass", "fail", "not_run", "blocked"}
 VALID_TOOL_APPROVALS = {"none", "auto", "manual"}
 VALID_APPROVAL_MODES = {"auto", "high_impact", "manual"}
+VALID_LLM_MESSAGE_ROLES = {"system", "user", "assistant"}
 
 HANDOFF_SCHEMA = """
 CREATE TABLE IF NOT EXISTS handoffs (
@@ -1309,9 +1311,309 @@ def read_text_input(input_file: str) -> str:
     return Path(input_file).read_text(encoding="utf-8")
 
 
+def parse_json_text(raw_text: str, field_name: str) -> Any:
+    try:
+        return json.loads(raw_text)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"{field_name} must be valid JSON: {exc.msg}") from exc
+
+
+def parse_optional_json_object(
+    raw_json: str | None,
+    input_file: str | None,
+    field_name: str,
+) -> dict[str, Any]:
+    if raw_json is None and input_file is None:
+        return {}
+    if raw_json is not None and input_file is not None:
+        raise ValueError(f"Provide only one of inline JSON or file input for {field_name}.")
+
+    source_text = raw_json if raw_json is not None else read_text_input(input_file or "")
+    payload = parse_json_text(source_text, field_name)
+    return require_object(payload, field_name)
+
+
+def normalize_message_content(content: Any, field_name: str) -> str:
+    if isinstance(content, str):
+        return require_non_empty_string(content, field_name)
+    if not isinstance(content, list) or not content:
+        raise ValueError(
+            f"{field_name} must be a non-empty string or a non-empty list of text blocks."
+        )
+
+    pieces: list[str] = []
+    for index, block in enumerate(content):
+        block_obj = require_object(block, f"{field_name}[{index}]")
+        text_value = block_obj.get("text")
+        if not isinstance(text_value, str) or not text_value.strip():
+            raise ValueError(f"{field_name}[{index}].text must be a non-empty string.")
+        pieces.append(text_value.strip())
+    return "\n".join(pieces)
+
+
+def normalize_llm_messages(messages_payload: Any) -> list[dict[str, str]]:
+    if not isinstance(messages_payload, list) or not messages_payload:
+        raise ValueError("messages must be a non-empty list.")
+
+    normalized: list[dict[str, str]] = []
+    for index, message_payload in enumerate(messages_payload):
+        message = require_object(message_payload, f"messages[{index}]")
+        role = require_non_empty_string(message.get("role"), f"messages[{index}].role").lower()
+        if role not in VALID_LLM_MESSAGE_ROLES:
+            raise ValueError(
+                f"messages[{index}].role must be one of {sorted(VALID_LLM_MESSAGE_ROLES)}."
+            )
+        content = normalize_message_content(
+            message.get("content"),
+            f"messages[{index}].content",
+        )
+        normalized.append({"role": role, "content": content})
+
+    return normalized
+
+
+def load_llm_messages_from_inputs(
+    prompt: str | None,
+    messages_json: str | None,
+    messages_file: str | None,
+    system_prompts: list[str],
+) -> list[dict[str, str]]:
+    if prompt is not None:
+        messages: list[dict[str, str]] = [{"role": "user", "content": prompt}]
+    elif messages_json is not None:
+        messages = normalize_llm_messages(parse_json_text(messages_json, "messages_json"))
+    elif messages_file is not None:
+        messages = normalize_llm_messages(parse_json_text(read_text_input(messages_file), "messages_file"))
+    else:
+        raise ValueError("One of prompt, messages_json, or messages_file is required.")
+
+    prefixed_system_prompts = [
+        {"role": "system", "content": require_non_empty_string(item, "system[]")}
+        for item in system_prompts
+    ]
+    return prefixed_system_prompts + messages
+
+
+def normalize_optional_float(value: Any, field_name: str, minimum: float, maximum: float) -> float | None:
+    if value is None:
+        return None
+    if not isinstance(value, (int, float)):
+        raise ValueError(f"{field_name} must be a number between {minimum} and {maximum}.")
+    normalized = float(value)
+    if normalized < minimum or normalized > maximum:
+        raise ValueError(f"{field_name} must be between {minimum} and {maximum}.")
+    return normalized
+
+
+def normalize_llm_request(payload: dict[str, Any]) -> dict[str, Any]:
+    provider = require_non_empty_string(payload.get("provider"), "provider").lower()
+    model = require_non_empty_string(payload.get("model"), "model")
+    messages = normalize_llm_messages(payload.get("messages"))
+
+    max_tokens = payload.get("max_tokens")
+    if max_tokens is not None:
+        max_tokens = require_positive_int(max_tokens, "max_tokens")
+
+    stop_sequences = require_string_list(payload.get("stop_sequences"), "stop_sequences")
+
+    provider_options_payload = payload.get("provider_options")
+    if provider_options_payload is None:
+        provider_options_payload = {}
+    provider_options = require_object(provider_options_payload, "provider_options")
+
+    region_name = str(payload.get("region_name", "")).strip() or None
+    profile_name = str(payload.get("profile_name", "")).strip() or None
+
+    return {
+        "provider": provider,
+        "model": model,
+        "messages": messages,
+        "max_tokens": max_tokens,
+        "temperature": normalize_optional_float(payload.get("temperature"), "temperature", 0.0, 2.0),
+        "top_p": normalize_optional_float(payload.get("top_p"), "top_p", 0.0, 1.0),
+        "stop_sequences": stop_sequences,
+        "region_name": region_name,
+        "profile_name": profile_name,
+        "provider_options": provider_options,
+    }
+
+
+def build_llm_request_from_args(args: argparse.Namespace) -> dict[str, Any]:
+    messages = load_llm_messages_from_inputs(
+        prompt=args.prompt,
+        messages_json=args.messages_json,
+        messages_file=args.messages_file,
+        system_prompts=args.system,
+    )
+    provider_options = parse_optional_json_object(
+        args.provider_options_json,
+        args.provider_options_file,
+        "provider_options",
+    )
+    return normalize_llm_request(
+        {
+            "provider": args.provider,
+            "model": args.model,
+            "messages": messages,
+            "max_tokens": args.max_tokens,
+            "temperature": args.temperature,
+            "top_p": args.top_p,
+            "stop_sequences": args.stop_sequence,
+            "region_name": args.region,
+            "profile_name": args.profile,
+            "provider_options": provider_options,
+        }
+    )
+
+
+def split_messages_for_bedrock(
+    messages: list[dict[str, str]],
+) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
+    bedrock_messages: list[dict[str, Any]] = []
+    system_messages: list[dict[str, str]] = []
+
+    for index, message in enumerate(messages):
+        role = message["role"]
+        content = message["content"]
+        if role == "system":
+            system_messages.append({"text": content})
+            continue
+        if role not in {"user", "assistant"}:
+            raise ValueError(
+                f"messages[{index}].role={role!r} is not supported by bedrock converse."
+            )
+        bedrock_messages.append({"role": role, "content": [{"text": content}]})
+
+    if not bedrock_messages:
+        raise ValueError("At least one user or assistant message is required for bedrock.")
+
+    return bedrock_messages, system_messages
+
+
+def extract_bedrock_text_from_message(message: dict[str, Any]) -> str:
+    content = message.get("content")
+    if not isinstance(content, list):
+        return ""
+    text_fragments: list[str] = []
+    for block in content:
+        if not isinstance(block, dict):
+            continue
+        text_value = block.get("text")
+        if isinstance(text_value, str):
+            text_fragments.append(text_value)
+    return "\n".join(fragment for fragment in text_fragments if fragment)
+
+
+def complete_with_bedrock(payload: dict[str, Any]) -> dict[str, Any]:
+    try:
+        boto3 = importlib.import_module("boto3")
+    except ModuleNotFoundError as exc:
+        raise ValueError(
+            "The 'bedrock' provider requires boto3. Install it with: pip install boto3"
+        ) from exc
+
+    provider_options = payload["provider_options"]
+    session_kwargs = require_object(
+        provider_options.get("session_kwargs", {}),
+        "provider_options.session_kwargs",
+    )
+    client_kwargs = require_object(
+        provider_options.get("client_kwargs", {}),
+        "provider_options.client_kwargs",
+    )
+    converse_overrides = require_object(
+        provider_options.get("converse_kwargs", {}),
+        "provider_options.converse_kwargs",
+    )
+
+    if "modelId" in converse_overrides or "messages" in converse_overrides:
+        raise ValueError(
+            "provider_options.converse_kwargs cannot override modelId or messages."
+        )
+
+    session = boto3.session.Session(
+        **{
+            **session_kwargs,
+            **({"profile_name": payload["profile_name"]} if payload["profile_name"] else {}),
+        }
+    )
+    client = session.client(
+        "bedrock-runtime",
+        **{
+            **client_kwargs,
+            **({"region_name": payload["region_name"]} if payload["region_name"] else {}),
+        },
+    )
+
+    bedrock_messages, system_messages = split_messages_for_bedrock(payload["messages"])
+    request_payload: dict[str, Any] = {
+        "modelId": payload["model"],
+        "messages": bedrock_messages,
+        **converse_overrides,
+    }
+    if system_messages:
+        request_payload["system"] = system_messages
+
+    inference_config = require_object(
+        request_payload.get("inferenceConfig", {}),
+        "provider_options.converse_kwargs.inferenceConfig",
+    )
+    if payload["max_tokens"] is not None:
+        inference_config["maxTokens"] = payload["max_tokens"]
+    if payload["temperature"] is not None:
+        inference_config["temperature"] = payload["temperature"]
+    if payload["top_p"] is not None:
+        inference_config["topP"] = payload["top_p"]
+    if payload["stop_sequences"]:
+        inference_config["stopSequences"] = payload["stop_sequences"]
+    if inference_config:
+        request_payload["inferenceConfig"] = inference_config
+
+    response = client.converse(**request_payload)
+    output_payload = response.get("output", {})
+    output_object = output_payload if isinstance(output_payload, dict) else {}
+    assistant_payload = output_object.get("message", {})
+    assistant_message = assistant_payload if isinstance(assistant_payload, dict) else {}
+    assistant_text = extract_bedrock_text_from_message(assistant_message)
+
+    return {
+        "provider": "bedrock",
+        "model": payload["model"],
+        "message": {
+            "role": "assistant",
+            "content": assistant_text,
+            "raw": assistant_message,
+        },
+        "stop_reason": response.get("stopReason"),
+        "usage": response.get("usage", {}),
+        "metrics": response.get("metrics", {}),
+        "request_id": response.get("ResponseMetadata", {}).get("RequestId"),
+        "raw_response": response,
+    }
+
+
+LLM_PROVIDERS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
+    "bedrock": complete_with_bedrock,
+}
+
+
+def llm_complete(payload: dict[str, Any]) -> dict[str, Any]:
+    normalized = normalize_llm_request(payload)
+    provider = normalized["provider"]
+    handler = LLM_PROVIDERS.get(provider)
+    if handler is None:
+        raise ValueError(
+            f"Unsupported provider: {provider!r}. Registered providers: {sorted(LLM_PROVIDERS)}"
+        )
+    return handler(normalized)
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Render role-specific AGENTS.md files and manage SQLite-backed handoffs.",
+        description=(
+            "Render role-specific AGENTS.md files, manage SQLite-backed handoffs, "
+            "and run provider-agnostic LLM completions."
+        ),
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -1361,6 +1663,24 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     list_parser.add_argument("--role")
     list_parser.add_argument("--status")
 
+    llm_complete_parser = subparsers.add_parser("llm-complete")
+    llm_complete_parser.add_argument("--provider", required=True)
+    llm_complete_parser.add_argument("--model", required=True)
+    input_group = llm_complete_parser.add_mutually_exclusive_group(required=True)
+    input_group.add_argument("--prompt")
+    input_group.add_argument("--messages-json")
+    input_group.add_argument("--messages-file")
+    llm_complete_parser.add_argument("--system", action="append", default=[])
+    llm_complete_parser.add_argument("--max-tokens", type=int)
+    llm_complete_parser.add_argument("--temperature", type=float)
+    llm_complete_parser.add_argument("--top-p", type=float)
+    llm_complete_parser.add_argument("--stop-sequence", action="append", default=[])
+    llm_complete_parser.add_argument("--region")
+    llm_complete_parser.add_argument("--profile")
+    provider_options_group = llm_complete_parser.add_mutually_exclusive_group()
+    provider_options_group.add_argument("--provider-options-json")
+    provider_options_group.add_argument("--provider-options-file")
+
     return parser.parse_args(argv)
 
 
@@ -1371,6 +1691,11 @@ def print_json(payload: Any) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
+
+    if args.command == "llm-complete":
+        print_json(llm_complete(build_llm_request_from_args(args)))
+        return 0
+
     config = load_config(args.config)
     db_path = config["output"]["database_path"]
 
