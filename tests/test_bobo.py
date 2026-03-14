@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -88,6 +89,7 @@ class BoboEngineTests(unittest.TestCase):
         self.assertIn("Your role is Implementer.", implementer_contents)
         self.assertIn('{"tool":"<tool_name>","args":{...}}', implementer_contents)
         self.assertIn("You do not have shell access.", implementer_contents)
+        self.assertIn("Requires approval before execution.", implementer_contents)
         self.assertNotIn("python3 bobo.py", implementer_contents)
 
     def test_record_claim_and_complete_handoff_round_trip(self) -> None:
@@ -208,9 +210,11 @@ class BoboEngineTests(unittest.TestCase):
             self.config,
             "Implementer",
             '{"tool":"claim_handoff","args":{}}',
+            base_path=self.root,
         )
 
         self.assertEqual("claim_handoff", dispatched["tool"])
+        self.assertEqual("completed", dispatched["execution_status"])
         self.assertEqual("claimed", dispatched["result"]["status"])
         self.assertEqual("Implementer", dispatched["result"]["to_role"])
 
@@ -226,12 +230,116 @@ class BoboEngineTests(unittest.TestCase):
                 '"ok":["Writes one AGENTS.md per role."],"arts":["generated_agents/implementer/AGENTS.md"],'
                 '"ts":"pass","tc":"python3 -m unittest discover -v","next":"Verify the renderer."}}'
             ),
+            base_path=self.root,
         )
 
         self.assertEqual("handoff", dispatched["tool"])
+        self.assertEqual("completed", dispatched["execution_status"])
         self.assertEqual("Implementer", dispatched["result"]["from_role"])
         self.assertEqual("Verifier", dispatched["result"]["to_role"])
         self.assertEqual(["bobo.py"], dispatched["result"]["file_scope"])
+
+    def test_dispatch_agent_output_executes_external_file_tools(self) -> None:
+        created = bobo.dispatch_agent_output(
+            self.db_path,
+            self.config,
+            "Implementer",
+            json.dumps(
+                {
+                    "tool": "create_file",
+                    "args": {"path": "notes.txt", "content": "alpha"},
+                }
+            ),
+            base_path=self.root,
+        )
+
+        self.assertEqual("create_file", created["tool"])
+        self.assertEqual("completed", created["execution_status"])
+        self.assertTrue((self.root / "notes.txt").exists())
+        self.assertEqual("alpha", (self.root / "notes.txt").read_text(encoding="utf-8"))
+
+        read_back = bobo.dispatch_agent_output(
+            self.db_path,
+            self.config,
+            "Implementer",
+            json.dumps({"tool": "read_file_or_directory", "args": {"path": "notes.txt"}}),
+            base_path=self.root,
+        )
+
+        self.assertEqual("file", read_back["result"]["kind"])
+        self.assertEqual("alpha", read_back["result"]["content"])
+
+        patched = bobo.dispatch_agent_output(
+            self.db_path,
+            self.config,
+            "Implementer",
+            json.dumps(
+                {
+                    "tool": "patch_code_file",
+                    "args": {"path": "notes.txt", "search": "alpha", "replace": "beta"},
+                }
+            ),
+            base_path=self.root,
+        )
+
+        self.assertEqual("completed", patched["execution_status"])
+        self.assertEqual(1, patched["result"]["replacements_applied"])
+        self.assertEqual("beta", (self.root / "notes.txt").read_text(encoding="utf-8"))
+
+    def test_dispatch_agent_output_runs_commands_without_shell_wrapping(self) -> None:
+        dispatched = bobo.dispatch_agent_output(
+            self.db_path,
+            self.config,
+            "Verifier",
+            json.dumps(
+                {
+                    "tool": "run_linter_and_tests",
+                    "args": {
+                        "argv": [sys.executable, "-c", "print('bobo-ok')"],
+                    },
+                }
+            ),
+            base_path=self.root,
+        )
+
+        self.assertEqual("completed", dispatched["execution_status"])
+        self.assertTrue(dispatched["result"]["ok"])
+        self.assertIn("bobo-ok", dispatched["result"]["stdout"])
+
+    def test_dispatch_agent_output_requires_approval_for_dependency_changes(self) -> None:
+        dispatched = bobo.dispatch_agent_output(
+            self.db_path,
+            self.config,
+            "Implementer",
+            json.dumps(
+                {
+                    "tool": "manage_dependencies",
+                    "args": {"pm": "pip", "act": "install", "pkgs": ["requests"]},
+                }
+            ),
+            base_path=self.root,
+        )
+
+        self.assertEqual("manage_dependencies", dispatched["tool"])
+        self.assertEqual("approval_required", dispatched["execution_status"])
+        self.assertTrue(dispatched["approval"]["required"])
+        self.assertFalse(dispatched["approval"]["approved"])
+        self.assertIsNone(dispatched["result"])
+
+    def test_dispatch_agent_output_rejects_paths_outside_workspace(self) -> None:
+        with self.assertRaisesRegex(ValueError, "path escapes the workspace root"):
+            bobo.dispatch_agent_output(
+                self.db_path,
+                self.config,
+                "Implementer",
+                json.dumps(
+                    {
+                        "tool": "read_file_or_directory",
+                        "args": {"path": "../outside.txt"},
+                    }
+                ),
+                base_path=self.root,
+            )
 
 
 if __name__ == "__main__":
