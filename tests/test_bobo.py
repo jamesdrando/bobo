@@ -40,6 +40,10 @@ class BoboEngineTests(unittest.TestCase):
                     {
                         "name": "Planner",
                         "model_tier": "frontier",
+                        "llm": {
+                            "provider": "openrouter",
+                            "model": "anthropic/claude-3.7-sonnet",
+                        },
                         "summary": "Plans narrow packets.",
                         "responsibilities": [
                             "Create one-file packets."
@@ -87,11 +91,43 @@ class BoboEngineTests(unittest.TestCase):
 
         self.assertIn("Your role is Planner.", planner_contents)
         self.assertIn("Plan the work.", planner_contents)
+        self.assertIn("Preferred provider: `openrouter`", planner_contents)
+        self.assertIn("Preferred model: `anthropic/claude-3.7-sonnet`", planner_contents)
         self.assertIn("Your role is Implementer.", implementer_contents)
         self.assertIn('{"tool":"<tool_name>","args":{...}}', implementer_contents)
         self.assertIn("You do not have shell access.", implementer_contents)
         self.assertIn("Requires approval before execution.", implementer_contents)
         self.assertNotIn("python3 bobo.py", implementer_contents)
+        self.assertIn("Inherit provider and model from the workspace defaults.", implementer_contents)
+
+    def test_resolve_role_llm_settings_merges_workspace_defaults(self) -> None:
+        planner_role = next(role for role in self.config["roles"] if role["name"] == "Planner")
+        implementer_role = next(role for role in self.config["roles"] if role["name"] == "Implementer")
+        workspace_settings = bobo.WorkspaceSettings(
+            chat=bobo.ChatDefaults(
+                default_provider="bedrock",
+                default_model="anthropic.claude-3-5-sonnet-20240620-v1:0",
+            ),
+            bedrock=bobo.BedrockDefaults(region="us-east-1", profile="default"),
+            openrouter=bobo.OpenRouterDefaults(
+                base_url="https://openrouter.ai/api/v1/chat/completions",
+                api_key_env="OPENROUTER_API_KEY",
+                site_url="https://example.com",
+                app_name="bobo-test",
+            ),
+        )
+
+        planner_llm = bobo.resolve_role_llm_settings(planner_role, workspace_settings)
+        implementer_llm = bobo.resolve_role_llm_settings(implementer_role, workspace_settings)
+
+        self.assertEqual("openrouter", planner_llm["provider"])
+        self.assertEqual("anthropic/claude-3.7-sonnet", planner_llm["model"])
+        self.assertEqual("OPENROUTER_API_KEY", planner_llm["provider_options"]["api_key_env"])
+        self.assertEqual("https://example.com", planner_llm["provider_options"]["site_url"])
+        self.assertEqual("bedrock", implementer_llm["provider"])
+        self.assertEqual("anthropic.claude-3-5-sonnet-20240620-v1:0", implementer_llm["model"])
+        self.assertEqual("us-east-1", implementer_llm["region_name"])
+        self.assertEqual("default", implementer_llm["profile_name"])
 
     def test_record_claim_and_complete_handoff_round_trip(self) -> None:
         payload = {
@@ -422,7 +458,7 @@ class LLMHarnessTests(unittest.TestCase):
                 return session
 
         fake_boto3 = FakeBoto3()
-        with mock.patch("bobo.importlib.import_module", return_value=fake_boto3):
+        with mock.patch("bobo.providers.bedrock.importlib.import_module", return_value=fake_boto3):
             response = bobo.llm_complete(
                 {
                     "provider": "bedrock",

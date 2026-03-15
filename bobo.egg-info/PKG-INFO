@@ -1,0 +1,12 @@
+Metadata-Version: 2.4
+Name: bobo
+Version: 0.1.0
+Summary: Chat-first orchestration for agentic software delivery.
+Requires-Python: >=3.11
+Provides-Extra: bedrock
+Requires-Dist: boto3>=1.34.0; extra == "bedrock"
+Provides-Extra: tui
+Requires-Dist: textual>=0.52.1; extra == "tui"
+Provides-Extra: all
+Requires-Dist: boto3>=1.34.0; extra == "all"
+Requires-Dist: textual>=0.52.1; extra == "all"

@@ -35,6 +35,13 @@
     {
       "name": "Planner",
       "model_tier": "frontier",
+      "llm": {
+        "provider": "openrouter",
+        "model": "stepfun/step-3.5-flash:free",
+        "provider_options": {
+          "app_name": "bobo-planner"
+        }
+      },
       "summary": "Builds the granular schedule, sets file ownership, and keeps the dependency graph coherent.",
       "responsibilities": [
         "Break work into dependency-aware packets that touch one file at a time whenever possible.",
@@ -52,6 +59,13 @@
     {
       "name": "Implementer",
       "model_tier": "cheap",
+      "llm": {
+        "provider": "openrouter",
+        "model": "stepfun/step-3.5-flash:free",
+        "provider_options": {
+          "app_name": "bobo-implementer"
+        }
+      },
       "summary": "Implements one narrow packet at a time and avoids self-expanding the scope.",
       "responsibilities": [
         "Modify only the assigned file and the named functions unless the planner explicitly says otherwise.",
@@ -66,6 +80,13 @@
     {
       "name": "Verifier",
       "model_tier": "cheap",
+      "llm": {
+        "provider": "openrouter",
+        "model": "stepfun/step-3.5-flash:free",
+        "provider_options": {
+          "app_name": "bobo-verifier"
+        }
+      },
       "summary": "Validates packets with narrow checks and returns compact pass or fail feedback.",
       "responsibilities": [
         "Call `run_linter_and_tests` with the specific validation command tied to the packet.",
@@ -80,6 +101,13 @@
     {
       "name": "Integrator",
       "model_tier": "cheap-plus",
+      "llm": {
+        "provider": "openrouter",
+        "model": "stepfun/step-3.5-flash:free",
+        "provider_options": {
+          "app_name": "bobo-integrator"
+        }
+      },
       "summary": "Assembles completed packets, resolves light coordination issues, and prepares merged delivery.",
       "responsibilities": [
         "Combine completed packets without reopening settled files unless necessary.",

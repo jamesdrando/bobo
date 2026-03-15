@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bobo"
+version = "0.1.0"
+description = "Chat-first orchestration for agentic software delivery."
+requires-python = ">=3.11"
+dependencies = []
+
+[project.optional-dependencies]
+bedrock = ["boto3>=1.34.0"]
+tui = ["textual>=0.52.1"]
+all = [
+  "boto3>=1.34.0",
+  "textual>=0.52.1",
+]
+
+[project.scripts]
+bobo = "bobo.__main__:main"
+
+[tool.setuptools]
+packages = ["bobo", "bobo.chat", "bobo.providers"]
